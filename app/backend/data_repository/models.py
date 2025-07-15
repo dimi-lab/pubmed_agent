@@ -56,3 +56,15 @@ class ScientificAbstract(BaseModel):
         """Pydantic configuration"""
         validate_assignment = True
         str_strip_whitespace = True
+
+class UserQueryRecord(BaseModel):
+    """Model for storing user query information"""
+    
+    user_query_id: str = Field(..., description="Unique identifier for the query")
+    user_query: str = Field(..., min_length=1, description="Original user query text")
+    created_at: Optional[datetime] = Field(default_factory=datetime.now, description="Timestamp when query was created")
+    abstract_count: Optional[int] = Field(None, ge=0, description="Number of abstracts retrieved")
+    
+    class Config:
+        validate_assignment = True
+        str_strip_whitespace = True
