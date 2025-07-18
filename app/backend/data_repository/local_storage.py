@@ -5,8 +5,8 @@ import shutil
 from typing import Dict, List, Optional
 from datetime import datetime
 from backend.data_repository.models import UserQueryRecord, ScientificAbstract
-from backend.data_repository.interface import UserQueryDataStore
 from config.logging_config import get_logger
+from backend.data_repository.repository_interface import UserQueryDataStore
 
 class LocalJSONStore(UserQueryDataStore):
     """Local JSON file storage implementation for testing and development"""

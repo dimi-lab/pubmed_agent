@@ -6,8 +6,8 @@ import requests
 from urllib3.exceptions import InsecureRequestWarning
 
 # Disable SSL verification for downloads
-ssl._create_default_https_context = ssl._create_unverified_context
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+#ssl._create_default_https_context = ssl._create_unverified_context
+#requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 def download_model_safely(model_name):
     """Download model with SSL fixes"""

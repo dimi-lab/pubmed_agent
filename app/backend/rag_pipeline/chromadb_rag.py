@@ -3,9 +3,9 @@ import chromadb
 from langchain_community.vectorstores import VectorStore, Chroma
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents.base import Document
-from backend.rag_pipeline.interface import RagWorkflow
 from config.logging_config import get_logger
 import os
+from backend.rag_pipeline.rag_interface import RagWorkflow
 
 class ChromaDbRag(RagWorkflow):
     """RAG workflow implementation using ChromaDB as vector store"""

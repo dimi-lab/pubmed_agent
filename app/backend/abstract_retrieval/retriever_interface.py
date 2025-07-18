@@ -17,3 +17,4 @@ class AbstractRetriever(ABC):
             List[ScientificAbstract]: List of relevant abstracts
         """
         raise NotImplementedError("Subclasses must implement get_abstract_data method")
+
