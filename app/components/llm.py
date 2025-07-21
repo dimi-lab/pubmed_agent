@@ -1,5 +1,5 @@
 """
-Optimized final LLM configuration with better response generation
+Optimized final LLM configuration with meta tensor error fixes
 """
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
@@ -31,8 +31,39 @@ def get_hf_token():
             return token.strip().strip('"').strip("'")
     return None
 
+def safe_model_to_device(model, device):
+    """Safely move model to device, handling meta tensors"""
+    try:
+        # Check if model has meta tensors
+        has_meta_tensors = any(param.device.type == 'meta' for param in model.parameters())
+        
+        if has_meta_tensors:
+            print("🔧 Detected meta tensors, using safe loading method...")
+            # Use to_empty() for meta tensors
+            model = model.to_empty(device=device)
+        else:
+            # Standard loading for regular tensors
+            model = model.to(device)
+            
+        print(f"✅ Model successfully moved to {device}")
+        return model
+        
+    except Exception as e:
+        print(f"⚠️ Standard device transfer failed: {e}")
+        try:
+            # Fallback: Force CPU first, then GPU
+            print("🔄 Trying fallback: CPU first, then GPU...")
+            model = model.cpu()
+            if device != "cpu":
+                model = model.to(device)
+            print(f"✅ Fallback successful: Model on {device}")
+            return model
+        except Exception as e2:
+            print(f"❌ Fallback also failed: {e2}")
+            raise e2
+
 def setup_biomistral_7b():
-    """Setup BioMistral with optimized parameters for RTX A6000"""
+    """Setup BioMistral with optimized parameters and meta tensor fixes"""
     model_name = "BioMistral/BioMistral-7B"
     
     try:
@@ -51,52 +82,118 @@ def setup_biomistral_7b():
         # Get HuggingFace token
         token = get_hf_token()
         
-        # Load tokenizer
+        # Load tokenizer first
+        print("📝 Loading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(
             model_name,
             use_auth_token=token,
             trust_remote_code=False
         )
         
-        # Load model with optimization
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            use_auth_token=token,
-            trust_remote_code=False,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            low_cpu_mem_usage=True
-        )
-        
-        # Move model to device
-        if device == "cuda":
-            model = model.to(device)
-        
         # Add padding token
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+        
+        print("🧠 Loading model with meta tensor support...")
+        
+        # Try multiple loading strategies for meta tensor compatibility
+        model = None
+        loading_strategies = [
+            "standard",
+            "low_memory",
+            "cpu_first",
+            "device_map"
+        ]
+        
+        for strategy in loading_strategies:
+            try:
+                print(f"🔄 Trying loading strategy: {strategy}")
+                
+                if strategy == "standard":
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        use_auth_token=token,
+                        trust_remote_code=False,
+                        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                        low_cpu_mem_usage=True
+                    )
+                    
+                elif strategy == "low_memory":
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        use_auth_token=token,
+                        trust_remote_code=False,
+                        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                        low_cpu_mem_usage=True,
+                        device_map="auto" if device == "cuda" else None
+                    )
+                    
+                elif strategy == "cpu_first":
+                    # Force CPU loading first
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        use_auth_token=token,
+                        trust_remote_code=False,
+                        torch_dtype=torch.float32,  # Use float32 for CPU
+                        low_cpu_mem_usage=True,
+                        device_map=None
+                    )
+                    
+                elif strategy == "device_map":
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        use_auth_token=token,
+                        trust_remote_code=False,
+                        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                        device_map="auto"
+                    )
+                
+                if model is not None:
+                    print(f"✅ Model loaded successfully with {strategy} strategy")
+                    
+                    # Only move to device if not using device_map
+                    if strategy not in ["device_map", "low_memory"] or device == "cpu":
+                        model = safe_model_to_device(model, device)
+                    
+                    break
+                    
+            except Exception as e:
+                print(f"⚠️ Strategy {strategy} failed: {e}")
+                model = None
+                continue
+        
+        if model is None:
+            raise Exception("All loading strategies failed")
         
         # Try to use the new HuggingFacePipeline
         try:
             from langchain_huggingface import HuggingFacePipeline
             print("Using updated langchain-huggingface package")
         except ImportError:
-            from langchain_community.llms import HuggingFacePipeline
-            print("Using langchain-community package (consider upgrading)")
+            try:
+                from langchain_community.llms import HuggingFacePipeline
+                print("Using langchain-community package")
+            except ImportError:
+                from langchain.llms import HuggingFacePipeline
+                print("Using legacy langchain package")
         
         # Create optimized pipeline for better responses
+        print("🔧 Creating text generation pipeline...")
         pipe = pipeline(
             "text-generation",
             model=model,
             tokenizer=tokenizer,
-            max_new_tokens=100,  # Generate up to 100 new tokens
-            min_new_tokens=10,   # Ensure at least 10 tokens
-            temperature=0.8,     # Slightly higher for more creativity
+            max_new_tokens=512,  # Generate up to 512 new tokens
+            min_new_tokens=50,   # Ensure at least 10 tokens
+            temperature=0.7,     # Slightly higher for more creativity
             do_sample=True,
             top_p=0.9,          # Nucleus sampling
             top_k=50,           # Top-k sampling
             repetition_penalty=1.1,  # Reduce repetition
-            device=0 if device == "cuda" else -1,
+            device=0 if device == "cuda" and torch.cuda.is_available() else -1,
             return_full_text=False,
+            length_penalty=1.0,
+            early_stopping=False,
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id
         )
@@ -106,12 +203,18 @@ def setup_biomistral_7b():
         
     except Exception as e:
         print(f"❌ Failed to load BioMistral: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def get_llm():
-    """Get optimized BioMistral LLM"""
+    """Get optimized BioMistral LLM with error handling"""
     
     print("🔧 Initializing optimized BioMistral LLM...")
+    
+    # Clear any existing CUDA cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     # Load the local model
     llm = setup_biomistral_7b()
@@ -132,11 +235,11 @@ def test_llm(llm):
         print("🧪 Testing LLM with optimized parameters...")
         
         test_prompts = [
-            "Hello! How are you doing today?",
-            "What's your favorite programming language?",
-            "Can you tell me about artificial intelligence?",
-            "What do you think about machine learning?",
-            "How can I improve my coding skills?"
+            "What is cancer?",
+            "Explain diabetes briefly.",
+            "What are antibiotics?",
+            "Describe the heart.",
+            "What is DNA?"
         ]
         
         successful_tests = 0
@@ -147,8 +250,8 @@ def test_llm(llm):
                 response = llm.invoke(prompt)
                 
                 # Check if response is meaningful
-                if response and len(response.strip()) > 1:
-                    print(f"✅ Response: {response}")
+                if response and len(response.strip()) > 10:
+                    print(f"✅ Response: {response[:100]}...")
                     successful_tests += 1
                 else:
                     print(f"⚠️ Short response: '{response}'")
@@ -165,7 +268,7 @@ def test_llm(llm):
         print(f"❌ LLM test failed: {e}")
         return False
 
-def benchmark_performance(llm, num_tests=5):
+def benchmark_performance(llm, num_tests=3):
     """Benchmark LLM performance"""
     if llm is None:
         return
@@ -174,7 +277,7 @@ def benchmark_performance(llm, num_tests=5):
     
     import time
     
-    prompt = "Tell me about the benefits of using Python for data science and machine learning projects."
+    prompt = "What is machine learning in healthcare?"
     times = []
     
     for i in range(num_tests):
@@ -200,14 +303,17 @@ def benchmark_performance(llm, num_tests=5):
         
         # GPU memory usage
         if torch.cuda.is_available():
-            memory_allocated = torch.cuda.memory_allocated(0) / (1024**3)
-            memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)
-            print(f"   GPU Memory: {memory_allocated:.2f}GB allocated, {memory_reserved:.2f}GB reserved")
+            try:
+                memory_allocated = torch.cuda.memory_allocated(0) / (1024**3)
+                memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)
+                print(f"   GPU Memory: {memory_allocated:.2f}GB allocated, {memory_reserved:.2f}GB reserved")
+            except:
+                print("   GPU Memory: Unable to get memory info")
 
 # Initialize the LLM
 if __name__ == "__main__":
-    print("🚀 BioMistral LLM")
-    print("=" * 40)
+    print("🚀 BioMistral LLM with Meta Tensor Fixes")
+    print("=" * 50)
     
     llm = get_llm()
     if llm:
@@ -218,8 +324,6 @@ if __name__ == "__main__":
             print("\n⚠️ LLM working but responses could be better")
     else:
         print("❌ Failed to load LLM")
-else:
-    llm = get_llm()
 
 # Export the LLM instance
-__all__ = ['llm', 'get_llm', 'test_llm', 'benchmark_performance']
+__all__ = ['get_llm', 'test_llm', 'benchmark_performance']

@@ -1,1045 +1,764 @@
 import streamlit as st
 import os
 import sys
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import logging
 from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-PUBMED_EMAIL="gnanaolivu.rohandavid@mayo.com"
-PUBMED_API_KEY="f9ecce69a73048b82ca4747f51d6dec61408"
-os.environ['ANONYMIZED_TELEMETRY'] = 'False'
-os.environ['CHROMA_TELEMETRY'] = 'False'
-os.environ['POSTHOG_HOST'] = ''
 
-def initialize_system_components() -> Dict[str, Any]:
-    """Initialize all system components with comprehensive error handling"""
-    components = {
-        'ai_model': None,
-        'retriever': None,
-        'rag_system': None,
-        'status': {},
-        'errors': {}
+# Configuration
+CONFIG = {
+    'PUBMED_EMAIL': "gnanaolivu.rohandavid@mayo.com",
+    'PUBMED_API_KEY': "f9ecce69a73048b82ca4747f51d6dec61408",
+    'MAX_PAPERS_DEFAULT': 20,
+    'RESPONSE_LENGTH_DEFAULT': "Medium",
+    'MAX_RETRIES_DEFAULT': 3
+}
+
+# Set environment variables
+os.environ.update({
+    'ANONYMIZED_TELEMETRY': 'False',
+    'CHROMA_TELEMETRY': 'False',
+    'POSTHOG_HOST': ''
+})
+
+def load_custom_css():
+    """Load clean white theme CSS"""
+    st.markdown("""
+    <style>
+    .stApp { background: #ffffff; color: #000000 !important; }
+    * { color: #000000 !important; }
+    .css-1d391kg { background: #f0f2f6; border-right: 1px solid #e6e6e6; }
+    h1, h2, h3, h4, h5, h6 { color: #0066cc !important; font-weight: 600; }
+    .stButton button { 
+        background-color: #0066cc; color: #ffffff !important; border: none; 
+        border-radius: 8px; padding: 8px 16px; font-weight: 500; 
     }
+    .stButton button:hover { background-color: #0052a3; }
+    .stTextInput > div > div > input, .stTextArea > div > div > textarea {
+        background-color: #ffffff; color: #000000; border: 2px solid #e6e6e6; border-radius: 8px;
+    }
+    .stTextArea textarea { 
+        background-color: #f8f9fa !important; color: #000000 !important; 
+        border: 2px solid #e6e6e6 !important; border-radius: 8px;
+    }
+    .stSuccess { background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724 !important; }
+    .stInfo { background-color: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460 !important; }
+    .stWarning { background-color: #fff3cd; border: 1px solid #ffeaa7; color: #856404 !important; }
+    .stError { background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24 !important; }
+    .metric-container {
+        background: #ffffff; padding: 20px; border-radius: 8px; 
+        border: 1px solid #e6e6e6; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-    # 1. Initialize BioMistral AI Model
-    try:
-        # Import the optimized BioMistral LLM
-        from components.llm import get_llm, test_llm
-        
-        st.info("🔄 Loading BioMistral-7B model...")
-        ai_model = get_llm()
-        
-        if ai_model is not None:
-            # Test the model with a longer response
-            try:
-                test_prompt = "Explain what cancer is in simple terms."
-                test_response = ai_model.invoke(test_prompt)
-                
-                if test_response and len(test_response.strip()) > 5:
-                    components['ai_model'] = ai_model
-                    components['status']['ai'] = "✅ AI Assistant: Ready (BioMistral-7B on RTX A6000)"
-                    logger.info(f"BioMistral-7B model initialized and tested successfully. Test response: {test_response[:100]}...")
-                else:
-                    components['errors']['ai'] = f"Model loaded but test response was too short: '{test_response}'"
-                    components['status']['ai'] = "⚠️ AI Assistant: Loaded but giving short responses"
-                    components['ai_model'] = ai_model  # Still use it
-                    logger.warning(f"BioMistral-7B giving short responses: '{test_response}'")
-            except Exception as test_error:
-                components['errors']['ai'] = f"Model test failed: {str(test_error)}"
-                components['status']['ai'] = f"⚠️ AI Assistant: Loaded but untested - {str(test_error)}"
-                components['ai_model'] = ai_model  # Still use it
-        else:
-            components['errors']['ai'] = "Failed to load BioMistral-7B model"
-            components['status']['ai'] = "❌ AI Assistant: Failed to load BioMistral-7B model"
-            
-    except ImportError as e:
-        components['errors']['ai'] = f"Import error: {str(e)}"
-        components['status']['ai'] = f"❌ AI Assistant: Module not found - {str(e)}"
-        logger.error(f"Failed to import BioMistral-7B model: {e}")
-    except Exception as e:
-        components['errors']['ai'] = str(e)
-        components['status']['ai'] = f"❌ AI Assistant: Failed - {str(e)}"
-        logger.error(f"Failed to initialize BioMistral-7B model: {e}")
-
-    # 2. Initialize PubMed Retriever (Optional)
-    try:
-        from backend.abstract_retrieval.pubmed_retriever import create_configured_pubmed_retriever
-        components['retriever'] = create_configured_pubmed_retriever(max_results=20)
-        components['status']['pubmed'] = "✅ PubMed Retriever: Ready"
-        logger.info("PubMed retriever initialized successfully")
-    except ImportError as e:
-        components['errors']['pubmed'] = f"Import error: {str(e)}"
-        components['status']['pubmed'] = "⚠️ PubMed Retriever: Module not found (using AI-only mode)"
-        logger.warning(f"PubMed retriever not available: {e}")
-    except Exception as e:
-        components['errors']['pubmed'] = str(e)
-        components['status']['pubmed'] = f"❌ PubMed Retriever: Failed - {str(e)}"
-        logger.error(f"Failed to initialize PubMed retriever: {e}")
-
-    # 3. Initialize RAG System (Optional)
-    try:
-        if components['ai_model']:  # Only need AI model for basic RAG
-            from backend.rag_pipeline.chromadb_rag import ChromaDbRag
-            from backend.rag_pipeline.embeddings import embeddings
-            from backend.data_repository.local_storage import LocalJSONStore
-
-            # Check if embeddings are available
-            if embeddings is not None:
-                # Initialize storage and RAG
-                storage = LocalJSONStore("./data/storage")
-                rag_system = ChromaDbRag("./data/vector_store", embeddings)
-
-                components['storage'] = storage
-                components['rag_system'] = rag_system
-                components['status']['rag'] = "✅ RAG System: Ready (BioMistral-7B + Embeddings)"
-                logger.info("RAG system initialized successfully with BioMistral")
-            else:
-                components['errors']['rag'] = "Embeddings not available"
-                components['status']['rag'] = "⚠️ RAG System: Embeddings not available"
-    except Exception as e:
-        components['errors']['rag'] = str(e)
-        components['status']['rag'] = f"⚠️ RAG System: Not available - {str(e)}"
-        logger.warning(f"RAG system not available: {e}")
-
-    return components
-
-
-def enhance_prompt_for_biomistral(question: str, length_preference: str = "Medium") -> str:
-    """Enhanced prompting specifically optimized for BioMistral"""
+class SystemInitializer:
+    """Handle system component initialization"""
     
-    # BioMistral works better with conversational, medical context
-    if length_preference == "Short":
-        length_instruction = "Provide a concise but informative medical answer (2-3 sentences)."
-    elif length_preference == "Long":
-        length_instruction = "Provide a comprehensive medical explanation with details, mechanisms, and clinical relevance."
-    else:
-        length_instruction = "Provide a clear, informative medical answer with appropriate detail."
-    
-    # Enhanced prompt structure for BioMistral
-    enhanced_prompt = f"""You are BioMistral, an expert medical AI assistant with deep knowledge of biomedical research, clinical medicine, and life sciences. {length_instruction}
-
-Medical Question: {question}
-
-Please provide an evidence-based response that includes:
-- Clear explanation of relevant concepts
-- Scientific mechanisms when applicable  
-- Clinical significance or applications
-- Current research status if relevant
-
-Medical Response:"""
-    
-    return enhanced_prompt
-
-
-def get_BioMistral_response(ai_model, question: str, length_preference: str = "Medium", max_retries: int = 3) -> str:
-    """Enhanced BioMistral response generation with better prompting"""
-    
-    for attempt in range(max_retries):
+    @staticmethod
+    def init_ai_model():
+        """Initialize BioMistral AI model with multiple strategies"""
         try:
-            if attempt == 0:
-                # First attempt: Enhanced medical prompt
-                prompt = enhance_prompt_for_biomistral(question, length_preference)
-            elif attempt == 1:
-                # Second attempt: Simple medical conversation
-                prompt = f"""As a medical AI assistant, please answer this question about {question}
-
-Provide a detailed medical explanation:"""
-            elif attempt == 2:
-                # Third attempt: Direct biomedical prompt
-                prompt = f"""Question: {question}
-
-Medical Answer:"""
-            else:
-                # Final attempt: Very simple
-                prompt = question
+            from components.llm import get_llm
             
-            logger.info(f"BioMistral attempt {attempt + 1} with enhanced prompt...")
+            strategies = ["default", "cpu_first", "low_memory", "torch_dtype_fix"]
             
-            # Use the model
-            response = ai_model.invoke(prompt)
+            for strategy in strategies:
+                try:
+                    st.info(f"🔄 Trying strategy: {strategy}")
+                    
+                    if strategy == "cpu_first":
+                        import torch
+                        with torch.device('cpu'):
+                            model = get_llm()
+                    elif strategy == "low_memory":
+                        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
+                        model = get_llm()
+                    else:
+                        model = get_llm()
+                    
+                    if model and SystemInitializer._test_model(model):
+                        st.success(f"✅ Model loaded with {strategy}")
+                        return model, "✅ AI Assistant: Ready (BioMistral-7B)"
+                        
+                except Exception as e:
+                    st.warning(f"⚠️ {strategy} failed: {str(e)}")
+                    continue
             
-            # Clean up response
-            if response:
-                response = response.strip()
-                
-                # Remove common prompt artifacts
-                if response.startswith(("Medical Response:", "Medical Answer:", "Answer:")):
-                    response = response.split(":", 1)[1].strip()
-                
-                # Remove conversation formatting
-                if "Human:" in response or "Assistant:" in response:
-                    lines = response.split('\n')
-                    cleaned_lines = []
-                    for line in lines:
-                        if not line.strip().startswith(('Human:', 'Assistant:', 'Question:')):
-                            cleaned_lines.append(line)
-                    response = '\n'.join(cleaned_lines).strip()
-                
-                # Check if response is meaningful
-                if len(response) > 10 and response not in [".", "?", "!", "...", "N/A"]:
-                    logger.info(f"BioMistral successful response (attempt {attempt + 1}): {response[:100]}...")
-                    return response
-                else:
-                    logger.warning(f"BioMistral short response (attempt {attempt + 1}): '{response}'")
+            return None, "❌ AI Assistant: Failed to load"
             
         except Exception as e:
-            logger.error(f"BioMistral attempt {attempt + 1} failed: {e}")
+            return None, f"❌ AI Assistant: {str(e)}"
     
-    # If all attempts fail, return a helpful message
-    return f"""I apologize, but I'm experiencing difficulty generating a proper response to your question: "{question}"
-
-This may be due to:
-- Model configuration issues
-- Prompt formatting problems  
-- Resource constraints
-
-Please try:
-1. Rephrasing your question more simply
-2. Using shorter, more specific queries
-3. Checking the system status
-4. Using a different research mode
-
-If the problem persists, please check the system logs for more details."""
-
-
-# STEP 3B: Add better error handling to your initialization
-def initialize_system_components_enhanced() -> Dict[str, Any]:
-    """Enhanced system initialization with better error handling"""
-    components = {
-        'ai_model': None,
-        'retriever': None,
-        'rag_system': None,
-        'storage': None,
-        'status': {},
-        'errors': {}
-    }
-
-    # 1. Initialize BioMistral AI Model with enhanced testing
-    try:
-        from components.llm import get_llm
+    @staticmethod
+    def _test_model(model):
+        """Test if model works"""
+        try:
+            response = model.invoke("What is cancer?")
+            return response and len(response.strip()) > 5
+        except:
+            return False
+    
+    @staticmethod
+    def init_pubmed():
+        """Initialize PubMed retriever"""
+        try:
+            from backend.abstract_retrieval.pubmed_retriever import create_configured_pubmed_retriever
+            retriever = create_configured_pubmed_retriever(max_results=CONFIG['MAX_PAPERS_DEFAULT'])
+            return retriever, "✅ PubMed Retriever: Ready"
+        except Exception as e:
+            return None, f"⚠️ PubMed Retriever: {str(e)}"
+    
+    @staticmethod
+    def init_rag(ai_model):
+        """Initialize RAG system"""
+        if not ai_model:
+            return None, None, "⚠️ RAG System: No AI model"
         
-        st.info("🔄 Loading BioMistral model...")
-        ai_model = get_llm()
-        
-        if ai_model is not None:
-            # Enhanced model testing with better prompts
-            try:
-                test_questions = [
-                    "What is cancer?",
-                    "Explain diabetes briefly.",
-                    "What are antibiotics?"
-                ]
-                
-                success_count = 0
-                for test_q in test_questions:
-                    test_response = get_BioMistral_response(ai_model, test_q, "Short", max_retries=1)
-                    if test_response and len(test_response.strip()) > 15:
-                        success_count += 1
-                
-                if success_count >= 2:  # At least 2 out of 3 tests should pass
-                    components['ai_model'] = ai_model
-                    components['status']['ai'] = f"✅ AI Assistant: Ready (BioMistral - {success_count}/3 tests passed)"
-                    logger.info(f"BioMistral model initialized successfully ({success_count}/3 tests passed)")
-                else:
-                    components['errors']['ai'] = f"Model giving poor responses ({success_count}/3 tests passed)"
-                    components['status']['ai'] = f"⚠️ AI Assistant: Working but responses may be short ({success_count}/3)"
-                    components['ai_model'] = ai_model  # Still use it
-                    
-            except Exception as test_error:
-                components['errors']['ai'] = f"Model test failed: {str(test_error)}"
-                components['status']['ai'] = f"⚠️ AI Assistant: Loaded but untested - {str(test_error)}"
-                components['ai_model'] = ai_model  # Still use it
-        else:
-            components['errors']['ai'] = "Failed to load BioMistral model"
-            components['status']['ai'] = "❌ AI Assistant: Failed to load"
-            
-    except Exception as e:
-        components['errors']['ai'] = str(e)
-        components['status']['ai'] = f"❌ AI Assistant: Failed - {str(e)}"
-        logger.error(f"Failed to initialize BioMistral: {e}")
-
-    # 2. Initialize PubMed Retriever
-    try:
-        from backend.abstract_retrieval.pubmed_retriever import create_configured_pubmed_retriever
-        components['retriever'] = create_configured_pubmed_retriever(max_results=20)
-        components['status']['pubmed'] = "✅ PubMed Retriever: Ready"
-        logger.info("PubMed retriever initialized successfully")
-    except Exception as e:
-        components['errors']['pubmed'] = str(e)
-        components['status']['pubmed'] = f"⚠️ PubMed Retriever: {str(e)}"
-        logger.warning(f"PubMed retriever not available: {e}")
-
-    # 3. Initialize RAG System (Enhanced)
-    try:
-        if components['ai_model']:
+        try:
             from backend.rag_pipeline.chromadb_rag import ChromaDbRag
             from backend.rag_pipeline.embeddings import embeddings
             from backend.data_repository.local_storage import LocalJSONStore
-
-            # Check if embeddings are available
-            if embeddings is not None:
-                # Initialize storage and RAG
+            
+            if embeddings:
                 storage = LocalJSONStore("./data/storage")
                 rag_system = ChromaDbRag("./data/vector_store", embeddings)
-
-                # Test RAG system
-                test_working, test_message = test_rag_integration({
-                    'rag_system': rag_system,
-                    'storage': storage,
-                    'ai_model': components['ai_model']
-                })
-
-                if test_working:
-                    components['storage'] = storage
-                    components['rag_system'] = rag_system
-                    components['status']['rag'] = "✅ RAG System: Ready and tested"
-                    logger.info("RAG system initialized and tested successfully")
-                else:
-                    components['errors']['rag'] = f"RAG test failed: {test_message}"
-                    components['status']['rag'] = f"⚠️ RAG System: Available but test failed"
-                    # Still provide the components for manual testing
-                    components['storage'] = storage
-                    components['rag_system'] = rag_system
+                return storage, rag_system, "✅ RAG System: Ready"
             else:
-                components['errors']['rag'] = "Embeddings not available"
-                components['status']['rag'] = "⚠️ RAG System: Embeddings not available"
-    except Exception as e:
-        components['errors']['rag'] = str(e)
-        components['status']['rag'] = f"⚠️ RAG System: Not available - {str(e)}"
-        logger.warning(f"RAG system not available: {e}")
+                return None, None, "⚠️ RAG System: No embeddings"
+                
+        except Exception as e:
+            return None, None, f"⚠️ RAG System: {str(e)}"
 
-    return components
-
-
-def render_system_status(components: Dict[str, Any]):
-    """Render system status with expandable details"""
-    has_errors = any(components['errors'].values())
-    has_warnings = any("⚠️" in status for status in components['status'].values())
+def initialize_system_components():
+    """Initialize all system components"""
+    st.info("🔄 Loading system components...")
     
-    # Show expanded if there are errors, collapsed if just warnings
-    expanded = has_errors
+    # Initialize AI model
+    ai_model, ai_status = SystemInitializer.init_ai_model()
+    
+    # Initialize PubMed
+    retriever, pubmed_status = SystemInitializer.init_pubmed()
+    
+    # Initialize RAG
+    storage, rag_system, rag_status = SystemInitializer.init_rag(ai_model)
+    
+    return {
+        'ai_model': ai_model,
+        'retriever': retriever,
+        'rag_system': rag_system,
+        'storage': storage,
+        'status': {
+            'ai': ai_status,
+            'pubmed': pubmed_status,
+            'rag': rag_status
+        }
+    }
 
-    with st.expander("🔍 System Status", expanded=expanded):
-        # Core status
-        for component, status in components['status'].items():
-            if "✅" in status:
-                st.success(status)
-            elif "⚠️" in status:
-                st.warning(status)
-            else:
-                st.error(status)
+class PromptEngine:
+    """Handle prompt generation and response processing"""
+    
+    @staticmethod
+    def create_biomistral_prompt(question: str, length_preference: str = "Medium", context: str = None):
+        """Create optimized BioMistral prompt"""
+        length_map = {
+            "Short": "Provide a concise medical answer (2-3 sentences).",
+            "Long": "Provide a comprehensive medical explanation with details and mechanisms (300-500 words).",
+            "Medium": "Provide a clear, informative medical answer with appropriate detail (150-300 words)."
+        }
+        
+        base_prompt = f"""You are BioMistral, an expert medical AI assistant. {length_map.get(length_preference, length_map['Medium'])}
 
-        # Show GPU status if AI model is loaded
-        if components['ai_model']:
+Medical Question: {question}"""
+        
+        if context:
+            base_prompt += f"\n\nRelevant Research Context:\n{context}"
+        
+        base_prompt += "\n\nProvide a complete and thorough medical response:"
+        return base_prompt
+    
+    @staticmethod
+    def get_biomistral_response(ai_model, question: str, length_preference: str = "Medium", 
+                               context: str = None, max_retries: int = 3):
+        """Get response from BioMistral with retries and better parameters"""
+        for attempt in range(max_retries):
             try:
-                import torch
-                if torch.cuda.is_available():
-                    gpu_name = torch.cuda.get_device_name(0)
-                    gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                    memory_used = torch.cuda.memory_allocated(0) / (1024**3)
-                    st.info(f"🚀 GPU: {gpu_name} ({gpu_memory:.1f}GB total, {memory_used:.2f}GB used)")
+                if attempt == 0:
+                    prompt = PromptEngine.create_biomistral_prompt(question, length_preference, context)
+                elif attempt == 1:
+                    prompt = f"As a medical AI assistant, please provide a complete answer to: {question}"
                 else:
-                    st.info("💻 Running on CPU")
-            except:
-                pass
-
-        # Show environment info
-        st.markdown("**Environment Configuration:**")
-        env_status = []
-
-        if PUBMED_EMAIL:
-            env_status.append("✅ PUBMED_EMAIL: Configured")
-        else:
-            env_status.append("⚠️ PUBMED_EMAIL: Not set")
-
-        if PUBMED_API_KEY:
-            env_status.append("✅ PUBMED_API_KEY: Configured")
-        else:
-            env_status.append("⚠️ PUBMED_API_KEY: Not set")
-
-        # Check for HuggingFace token
-        hf_token = os.getenv('HUGGINGFACE_TOKEN')
-        if hf_token:
-            env_status.append("✅ HUGGINGFACE_TOKEN: Configured")
-        else:
-            env_status.append("⚠️ HUGGINGFACE_TOKEN: Not set")
-
-        for status in env_status:
-            if "✅" in status:
-                st.success(status)
-            else:
-                st.warning(status)
-
-        # Show errors if any
-        if components['errors']:
-            st.markdown("**Error Details:**")
-            for component, error in components['errors'].items():
-                st.error(f"{component.upper()}: {error}")
-
-        # Show recommendations
-        st.markdown("**Recommendations:**")
-        recommendations = []
-
-        if not components['ai_model']:
-            recommendations.append("🤖 Check BioMistral model installation and dependencies")
-            recommendations.append("🔧 Ensure PyTorch and transformers are properly installed")
-
-        if not components['retriever']:
-            recommendations.append("📖 Install metapub: `pip install metapub`")
-            recommendations.append("🔑 Set PUBMED_API_KEY for PubMed access")
-
-        if not hf_token:
-            recommendations.append("🤗 Set HUGGINGFACE_TOKEN for model downloads")
-
-        # Add BioMistral specific recommendations
-        if components['ai_model'] and "short responses" in str(components.get('errors', {}).get('ai', '')):
-            recommendations.append("🔧 BioMistral may need parameter tuning for longer responses")
-            recommendations.append("💡 Try rephrasing questions if responses are too short")
-
-        if not recommendations:
-            recommendations.append("✅ All systems optimal!")
-
-        for rec in recommendations:
-            st.info(rec)
-
-
-def process_pubmed_query(question: str, retriever, ai_model, max_results: int = 20, length_preference: str = "Medium") -> str:
-    """Process a question using PubMed retrieval + BioMistral analysis"""
-    try:
-        # Step 1: Retrieve abstracts from PubMed
-        st.info(f"📖 Searching PubMed for: '{question}'")
-        abstracts = retriever.get_abstract_data(question)
-
-        if not abstracts:
-            fallback_response = get_BioMistral_response(ai_model, question, length_preference)
-            return f"❌ No relevant abstracts found in PubMed for: '{question}'\n\nUsing BioMistral knowledge instead:\n\n{fallback_response}"
-
-        st.success(f"📋 Retrieved {len(abstracts)} relevant abstracts")
-
-        # Step 2: Format abstracts for BioMistral analysis
-        formatted_abstracts = "\n\n".join([
-            f"Paper {i+1}:\n"
-            f"Title: {abstract.title}\n"
-            f"Authors: {', '.join(abstract.authors[:2])}{'...' if len(abstract.authors) > 2 else ''}\n"
-            f"Year: {abstract.year}\n"
-            f"Abstract: {abstract.abstract_content[:500]}{'...' if len(abstract.abstract_content) > 500 else ''}\n"
-            for i, abstract in enumerate(abstracts[:5])  # Limit to first 5 for BioMistral processing
-        ])
-
-        # Step 3: Create enhanced prompt for BioMistral
-        enhanced_question = f"Based on these research papers, {question}"
-        
-        # Step 4: Get BioMistral analysis
-        st.info("🧠 Analyzing retrieved literature with BioMistral...")
-        ai_response = get_BioMistral_response(ai_model, enhanced_question, length_preference)
-
-        # Step 5: Format final response
-        final_response = f"""## Literature-Based Analysis
-
-{ai_response}
-
----
-## Source Summary
-Retrieved {len(abstracts)} papers from PubMed
-Analyzed top {min(5, len(abstracts))} papers for this response
-
-**Key Papers:**
-"""
-
-        for i, abstract in enumerate(abstracts[:3]):  # Show top 3 papers
-            final_response += f"\n{i+1}. **{abstract.title}** ({abstract.year})\n   {', '.join(abstract.authors[:2])}{'...' if len(abstract.authors) > 2 else ''}\n"
-
-        return final_response
-
-    except Exception as e:
-        logger.error(f"Error in PubMed query processing: {e}")
-        fallback_response = get_BioMistral_response(ai_model, question, length_preference)
-        return f"❌ Error retrieving from PubMed: {str(e)}\n\nFalling back to BioMistral knowledge:\n\n{fallback_response}"
-
-def render_chat_interface(ai_model):
-    """Render interactive chat interface with BioMistral"""
-    st.markdown("---")
-    st.subheader("💬 Interactive Chat with BioMistral")
-
-    # Initialize chat history
-    if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {"role": "assistant", "content": "Hello! I'm BioMistral, your biomedical research assistant. Ask me anything about medicine, biology, or health research!"}
-        ]
-
-    # Display chat messages
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
-
-    # Chat input
-    if prompt := st.chat_input("Ask BioMistral about biomedical research..."):
-        # Add user message
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.write(prompt)
-
-        # Generate BioMistral response
-        with st.chat_message("assistant"):
-            with st.spinner("BioMistral is thinking..."):
-                try:
-                    response = get_BioMistral_response(ai_model, prompt, "Medium", max_retries=2)
-                    st.write(response)
-                    st.session_state.messages.append({"role": "assistant", "content": response})
-                except Exception as e:
-                    error_msg = f"Sorry, I encountered an error: {str(e)}"
-                    st.write(error_msg)
-                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
-                    logger.error(f"Chat error: {e}")
-
-# STEP 2: Replace your render_research_interface function in app.py
-
-def render_research_interface(components: Dict[str, Any]):
-    """Render the main research interface with RAG support"""
-    col1, col2 = st.columns([1, 1])
-
-    with col1:
-        st.subheader("🔍 Research Mode")
-
-        # Mode selection with RAG option
-        if components['retriever'] and components['ai_model'] and components['rag_system']:
-            mode = st.radio(
-                "Choose research mode:",
-                [
-                    "🧠 BioMistral Knowledge Only",
-                    "📬 PubMed + BioMistral (Simple)",
-                    "🚀 PubMed + RAG + BioMistral (Enhanced)"  # NEW RAG MODE!
-                ],
-                help="""
-                - Knowledge Only: Uses BioMistral's training knowledge
-                - Simple: Retrieves papers and feeds them directly to BioMistral  
-                - Enhanced: Uses semantic search (RAG) to find most relevant paper sections
-                """
-            )
-            use_rag = "RAG" in mode
-            use_pubmed = "PubMed" in mode
-        elif components['retriever'] and components['ai_model']:
-            mode = st.radio(
-                "Choose research mode:",
-                ["🧠 BioMistral Knowledge Only", "📬 PubMed + BioMistral (Simple)"],
-                help="RAG system not available"
-            )
-            use_rag = False
-            use_pubmed = "PubMed" in mode
-        elif components['ai_model']:
-            st.info("🧠 BioMistral Knowledge Mode Only (PubMed and RAG not available)")
-            use_rag = False
-            use_pubmed = False
-        else:
-            st.error("❌ No AI model available")
-            return
-
-        # Show what mode is selected
-        if use_rag:
-            st.success("🚀 Enhanced RAG Mode: Semantic search + AI analysis")
-        elif use_pubmed:
-            st.info("📬 Simple Mode: Direct paper analysis")
-        else:
-            st.info("🧠 Knowledge Mode: AI model only")
-
-        # Example questions tailored for BioMistral
-        st.markdown("**Try these examples:**")
-        examples = [
-            "How do cancer cells develop drug resistance?",
-            "What role does gut microbiota play in diabetes?",
-            "Explain the mechanism of CRISPR gene editing",
-            "How does machine learning help in drug discovery?",
-            "What are biomarkers for early Alzheimer's detection?",
-            "Describe immunotherapy mechanisms in cancer treatment",
-            "How do mRNA vaccines work?",
-            "What causes antibiotic resistance?",
-            "Explain the blood-brain barrier function",
-            "How do stem cells differentiate?"
-        ]
-
-        selected_example = None
-        for i, example in enumerate(examples):
-            if st.button(f"💡 {example}", key=f"ex_{i}"):
-                selected_example = example
-
-        # Custom question input
-        st.markdown("**Or ask your own question:**")
-        custom_question = st.text_area(
-            "Enter your biomedical research question:",
-            value=selected_example or "",
-            placeholder="Ask about biology, medicine, diseases, treatments, etc...",
-            height=100
-        )
-
-        # Advanced options
-        with st.expander("⚙️ Advanced Options"):
-            if use_pubmed:
-                max_papers = st.slider("Max papers to retrieve:", 5, 50, 20)
-            
-            # BioMistral specific options
-            response_length = st.select_slider(
-                "Response length preference:",
-                options=["Short", "Medium", "Long"],
-                value="Medium"
-            )
-            
-            # Add retry option
-            max_retries = st.slider("Max retry attempts for better responses:", 1, 5, 3)
-
-        ask_button = st.button("🧠 Analyze Question", type="primary")
-
-    with col2:
-        st.subheader("🤖 BioMistral Analysis")
-
-        if ask_button and custom_question.strip():
-            with st.spinner("🤔 Processing your question..."):
-                try:
-                    if use_rag and components['rag_system']:
-                        # Use RAG-enhanced processing
-                        st.info("🚀 Using RAG-enhanced analysis...")
-                        response = process_pubmed_query_with_rag(
-                            custom_question,
-                            components['retriever'],
-                            components['ai_model'],
-                            components['rag_system'],
-                            components['storage'],
-                            max_results=locals().get('max_papers', 20),
-                            length_preference=locals().get('response_length', 'Medium')
-                        )
-                    elif use_pubmed and components['retriever']:
-                        # Use simple PubMed + BioMistral analysis
-                        st.info("📬 Using simple PubMed analysis...")
-                        response = process_pubmed_query(
-                            custom_question,
-                            components['retriever'],
-                            components['ai_model'],
-                            max_results=locals().get('max_papers', 20),
-                            length_preference=locals().get('response_length', 'Medium')
-                        )
-                    else:
-                        # BioMistral knowledge base only
-                        st.info("🧠 Using BioMistral knowledge only...")
-                        response = get_BioMistral_response(
-                            components['ai_model'], 
-                            custom_question, 
-                            length_preference=locals().get('response_length', 'Medium'),
-                            max_retries=locals().get('max_retries', 3)
-                        )
-
-                    st.markdown("### 📋 Analysis Results:")
+                    prompt = f"Please provide a detailed medical explanation for: {question}"
+                
+                # Get response with explicit request for completion
+                response = ai_model.invoke(prompt)
+                
+                if response and len(response.strip()) > 10:
+                    # Clean response
+                    response = response.strip()
+                    if response.startswith(("Medical Response:", "Medical Answer:", "Answer:")):
+                        response = response.split(":", 1)[1].strip()
                     
-                    # Display response with better formatting
-                    if response and len(response.strip()) > 5:
-                        st.write(response)
-                        st.success("✅ Analysis complete!")
-                        
-                        # Show mode used
-                        if use_rag:
-                            st.info("🚀 Used: RAG-enhanced semantic analysis")
-                        elif use_pubmed:
-                            st.info("📬 Used: Simple PubMed analysis")
-                        else:
-                            st.info("🧠 Used: BioMistral knowledge only")
+                    # Check if response seems complete (doesn't end mid-sentence)
+                    if PromptEngine._is_complete_response(response):
+                        return response
                     else:
-                        st.warning(f"⚠️ BioMistral returned a short response: '{response}'")
-                        st.info("💡 Try rephrasing your question or using a different mode.")
-
-                    # Add to session state for reference
-                    if 'research_history' not in st.session_state:
-                        st.session_state.research_history = []
-
-                    st.session_state.research_history.append({
-                        'question': custom_question,
-                        'response': response,
-                        'timestamp': datetime.now(),
-                        'mode': mode
-                    })
-
-                except Exception as e:
-                    st.error(f"❌ Error during analysis: {str(e)}")
-                    logger.error(f"Analysis error: {e}")
+                        logger.warning(f"Response appears truncated (attempt {attempt + 1}): ...{response[-50:]}")
+                        # Try again with different approach
+                        continue
                     
-                    # Try a simpler approach if the enhanced one fails
-                    try:
-                        st.info("🔄 Trying simplified approach...")
-                        simple_response = components['ai_model'].invoke(custom_question)
-                        st.markdown("### 📋 Simplified Analysis:")
-                        st.write(simple_response if simple_response else "No response generated")
-                    except Exception as e2:
-                        st.error(f"❌ Simplified approach also failed: {str(e2)}")
-                        
-        elif ask_button:
-            st.warning("⚠️ Please enter a question first.")
-        else:
-            st.info("👈 Select an example or enter your own question to get started!")
+            except Exception as e:
+                logger.error(f"Attempt {attempt + 1} failed: {e}")
+                continue
+        
+        return f"Unable to generate complete response for: '{question}'. Please try rephrasing or check system status."
+    
+    @staticmethod
+    def _is_complete_response(response: str) -> bool:
+        """Check if response appears complete"""
+        # Check if response ends with proper punctuation
+        if response.endswith(('.', '!', '?', ':', ';')):
+            return True
+        
+        # Check if response seems to end mid-word or mid-sentence
+        last_words = response.split()[-3:] if len(response.split()) >= 3 else response.split()
+        
+        # If last few words seem incomplete
+        incomplete_indicators = ['the', 'a', 'an', 'and', 'or', 'but', 'that', 'this', 'with', 'from', 'by']
+        if any(word.lower() in incomplete_indicators for word in last_words):
+            return False
             
-            # Show what each mode does
-            st.markdown("### 🎯 Mode Explanations:")
-            if components['rag_system']:
-                st.markdown("""
-                **🚀 RAG Enhanced Mode:**
-                - Searches PubMed for relevant papers
-                - Creates semantic embeddings of paper content
-                - Uses AI to find most relevant sections
-                - Provides context-aware analysis
-                
-                **📬 Simple Mode:**
-                - Searches PubMed for relevant papers
-                - Feeds papers directly to BioMistral
-                - Good for straightforward questions
-                
-                **🧠 Knowledge Mode:**
-                - Uses BioMistral's training knowledge
-                - No external paper retrieval
-                - Fast responses
-                """)
-            else:
-                st.markdown("""
-                **📬 Simple Mode:**
-                - Searches PubMed for relevant papers
-                - Feeds papers directly to BioMistral
-                
-                **🧠 Knowledge Mode:**
-                - Uses BioMistral's training knowledge
-                - No external paper retrieval
-                """)
+        return True
 
-# Add this to your render_sidebar function
-def render_sidebar_with_rag_test(components: Dict[str, Any]):
-    """Enhanced sidebar with RAG testing"""
-    with st.sidebar:
-        st.header("🛠️ Tools")
-
-        # RAG Test Button (NEW!)
-        if components['rag_system'] and st.button("🧪 Test RAG Integration"):
-            with st.spinner("Testing RAG system..."):
-                working, message = test_rag_integration(components)
-                if working:
-                    st.success(f"✅ {message}")
-                else:
-                    st.error(f"❌ {message}")
-
-        # Test BioMistral button
-        if components['ai_model'] and st.button("🧪 Test BioMistral Response"):
-            with st.spinner("Testing BioMistral..."):
-                test_question = "What is diabetes?"
-                test_response = get_BioMistral_response(components['ai_model'], test_question, "Medium")
-                st.write(f"**Test Question:** {test_question}")
-                st.write(f"**Response:** {test_response}")
-
-        # Rest of your existing sidebar code...
-        # (Chat controls, model info, etc.)
-
-def render_sidebar(components: Dict[str, Any]):
-    """Render sidebar with tools and information"""
-    with st.sidebar:
-        st.header("🛠️ Tools")
-
-        # Test BioMistral button
-        if components['ai_model'] and st.button("🧪 Test BioMistral Response"):
-            with st.spinner("Testing BioMistral..."):
-                test_question = "What is diabetes?"
-                test_response = get_BioMistral_response(components['ai_model'], test_question, "Medium")
-                st.write(f"**Test Question:** {test_question}")
-                st.write(f"**Response:** {test_response}")
-
-        # Chat controls
-        if st.button("🔄 Clear Chat History"):
-            st.session_state.messages = [
-                {"role": "assistant", "content": "Chat history cleared! I'm BioMistral, ready to help with your biomedical questions!"}
-            ]
-            st.rerun()
-
-        if st.button("📋 Clear Research History"):
-            if 'research_history' in st.session_state:
-                del st.session_state.research_history
-            st.success("Research history cleared!")
-
-        # Model information
-        if components['ai_model']:
-            st.markdown("---")
-            st.subheader("🤖 Model Info")
-            st.write("**Current Model:** BioMistral-small")
-            st.write("**Platform:** Microsoft/HuggingFace")
-            st.write("**Specialization:** Conversational AI")
+class PubMedProcessor:
+    """Handle PubMed queries and analysis"""
+    
+    @staticmethod
+    def process_simple_query(question: str, retriever, ai_model, max_results: int = 20, 
+                           length_preference: str = "Medium"):
+        """Process PubMed query with simple analysis"""
+        try:
+            st.info(f"📖 Searching PubMed for: '{question}'")
+            abstracts = retriever.get_abstract_data(question)
             
-            # Show GPU info if available
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    gpu_name = torch.cuda.get_device_name(0)
-                    st.write(f"**Hardware:** {gpu_name}")
-                    memory_used = torch.cuda.memory_allocated(0) / (1024**3)
-                    st.write(f"**GPU Memory:** {memory_used:.2f}GB used")
-            except:
-                pass
+            if not abstracts:
+                fallback = PromptEngine.get_biomistral_response(ai_model, question, length_preference)
+                return f"❌ No PubMed results for: '{question}'\n\n**BioMistral Knowledge:**\n{fallback}"
+            
+            st.success(f"📋 Retrieved {len(abstracts)} papers")
+            
+            # Format abstracts for analysis
+            context = PubMedProcessor._format_abstracts(abstracts[:5])
+            
+            # Get analysis
+            st.info("🧠 Analyzing papers with BioMistral...")
+            analysis = PromptEngine.get_biomistral_response(
+                ai_model, question, length_preference, context
+            )
+            
+            return PubMedProcessor._format_response(question, analysis, abstracts)
+            
+        except Exception as e:
+            logger.error(f"PubMed processing error: {e}")
+            fallback = PromptEngine.get_biomistral_response(ai_model, question, length_preference)
+            return f"❌ PubMed error: {str(e)}\n\n**Fallback Analysis:**\n{fallback}"
+    
+    @staticmethod
+    def process_rag_query(pubmed_query: str, general_question: str, retriever, ai_model, rag_system, storage, 
+                         max_results: int = 20, length_preference: str = "Medium"):
+        """Process RAG query: Use PubMed query for literature retrieval, general question for RAG analysis"""
+        try:
+            st.info(f"📖 Searching PubMed with: '{pubmed_query}'")
+            abstracts = retriever.get_abstract_data(pubmed_query)
+            
+            if not abstracts:
+                fallback = PromptEngine.get_biomistral_response(ai_model, general_question, length_preference)
+                return f"❌ No PubMed results for: '{pubmed_query}'\n\n**BioMistral Knowledge for '{general_question}':**\n{fallback}"
+            
+            st.success(f"📋 Retrieved {len(abstracts)} papers using PubMed query")
+            st.info("🔧 Creating RAG knowledge base from retrieved papers...")
+            
+            # Create RAG index using PubMed results
+            query_id = storage.save_dataset(abstracts, pubmed_query)
+            documents = storage.create_document_list(abstracts)
+            vector_store = rag_system.create_vector_index_for_user_query(documents, query_id)
+            
+            st.info(f"🔍 Querying RAG with: '{general_question}'")
+            retriever_chain = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+            
+            # Use GENERAL QUESTION to query the RAG system
+            relevant_docs = retriever_chain.get_relevant_documents(general_question)
+            
+            # Format context from RAG results
+            context = "\n\n".join([
+                f"Relevant Section {i+1}: {doc.page_content}" 
+                for i, doc in enumerate(relevant_docs)
+            ])
+            
+            st.info("🧠 Generating RAG-enhanced analysis...")
+            
+            # Create enhanced prompt that shows the separation
+            rag_prompt = f"""Based on the following research papers retrieved from PubMed using the search "{pubmed_query}", please answer the question: "{general_question}"
 
-        # Research history
-        if 'research_history' in st.session_state and st.session_state.research_history:
-            st.markdown("---")
-            st.subheader("📚 Recent Research")
-            for i, item in enumerate(reversed(st.session_state.research_history[-5:])):  # Last 5
-                with st.expander(f"Q{len(st.session_state.research_history)-i}: {item['question'][:50]}..."):
-                    st.write(f"**Mode:** {item['mode']}")
-                    st.write(f"**Time:** {item['timestamp'].strftime('%H:%M:%S')}")
-                    st.write(f"**Question:** {item['question']}")
-                    st.write(f"**Response:** {item['response'][:200]}...")
-
-        st.markdown("---")
-        st.subheader("📊 Current Capabilities")
-
-        capabilities = []
-        if components['ai_model']:
-            capabilities.append("✅ BioMistral AI Assistant")
-        if components['retriever']:
-            capabilities.append("✅ PubMed Search")
-        if components['rag_system']:
-            capabilities.append("✅ RAG System")
-
-        if not capabilities:
-            capabilities.append("❌ Limited functionality")
-
-        for cap in capabilities:
-            st.write(cap)
-
-        st.markdown("---")
-        st.subheader("🎯 Usage Tips for BioMistral")
-        st.markdown("""
-        **For best results with BioMistral:**
-        - Ask clear, specific questions
-        - Use conversational language
-        - Break complex questions into parts
-        - If you get short responses, try rephrasing
-        - Use the test button to check BioMistral status
-        """)
-
-        st.markdown("---")
-        st.subheader("🏥 Knowledge Areas")
-        st.markdown("""
-        - **Cancer Research** 🎗️
-        - **Neuroscience** 🧠 
-        - **Immunology** 🦠
-        - **Genetics** 🧬
-        - **Drug Development** 💊
-        - **Clinical Trials** 📊
-        - **Biomarkers** 🔬
-        - **Medical Devices** ⚕️
-        """)
-# STEP 1: Replace this function in your app.py
-
-def process_pubmed_query_with_rag(question: str, retriever, ai_model, rag_system, storage, 
-                                  max_results: int = 20, length_preference: str = "Medium") -> str:
-    """
-    Process a question using PubMed retrieval + RAG + BioMistral analysis
-    This replaces your old process_pubmed_query function
-    """
-    try:
-        # Step 1: Retrieve abstracts from PubMed
-        st.info(f"📖 Searching PubMed for: '{question}'")
-        abstracts = retriever.get_abstract_data(question)
-
-        if not abstracts:
-            fallback_response = get_BioMistral_response(ai_model, question, length_preference)
-            return f"❌ No relevant abstracts found in PubMed for: '{question}'\n\nUsing BioMistral knowledge instead:\n\n{fallback_response}"
-
-        st.success(f"📋 Retrieved {len(abstracts)} relevant abstracts")
-
-        # Step 2: Save abstracts and create RAG index
-        st.info("🔧 Creating RAG knowledge base from retrieved papers...")
-        
-        # Save abstracts to storage
-        query_id = storage.save_dataset(abstracts, question)
-        
-        # Convert abstracts to documents for RAG
-        documents = storage.create_document_list(abstracts)
-        
-        # Create vector index for semantic search
-        vector_store = rag_system.create_vector_index_for_user_query(documents, query_id)
-        
-        st.success(f"✅ RAG knowledge base created with {len(documents)} document chunks")
-
-        # Step 3: Use RAG to get relevant context
-        st.info("🔍 Finding most relevant paper sections using semantic search...")
-        
-        # Create retriever from vector store
-        retriever_chain = vector_store.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": 5}  # Get top 5 most relevant chunks
-        )
-        
-        # Get relevant documents using semantic search
-        relevant_docs = retriever_chain.get_relevant_documents(question)
-        
-        # Step 4: Format context for BioMistral
-        context_sections = []
-        for i, doc in enumerate(relevant_docs):
-            context_sections.append(f"""
-Paper Section {i+1}:
-Source: {doc.metadata.get('title', 'Unknown')} ({doc.metadata.get('year_of_publication', 'N/A')})
-Authors: {doc.metadata.get('authors', 'Unknown')}
-Content: {doc.page_content}
-""")
-        
-        formatted_context = "\n".join(context_sections)
-        
-        # Step 5: Create enhanced prompt for BioMistral with RAG context
-        rag_prompt = f"""You are BioMistral, a medical research AI assistant. Based on the following scientific research papers, please answer this question: {question}
-
-RESEARCH CONTEXT FROM PUBMED PAPERS:
-{formatted_context}
+RELEVANT LITERATURE SECTIONS:
+{context}
 
 Please provide a comprehensive analysis that:
-1. Synthesizes information from the research papers
-2. Identifies key findings and trends
-3. Notes any contradictions or debates in the literature
-4. Provides evidence-based conclusions
+1. Directly answers the question: "{general_question}"
+2. Uses evidence from the retrieved literature about "{pubmed_query}"
+3. Synthesizes the most relevant information
+4. Provides clinical insights and implications
 
 Your detailed response:"""
+            
+            analysis = PromptEngine.get_biomistral_response(
+                ai_model, rag_prompt, length_preference
+            )
+            
+            return PubMedProcessor._format_rag_response_enhanced(
+                pubmed_query, general_question, analysis, abstracts, len(documents), len(relevant_docs)
+            )
+            
+        except Exception as e:
+            logger.error(f"RAG processing error: {e}")
+            fallback = PromptEngine.get_biomistral_response(ai_model, general_question, length_preference)
+            return f"❌ RAG error: {str(e)}\n\n**Fallback Analysis for '{general_question}':**\n{fallback}"
+    
+    @staticmethod
+    def _format_abstracts(abstracts: List) -> str:
+        """Format abstracts for AI analysis"""
+        return "\n\n".join([
+            f"Paper {i+1}:\nTitle: {abs.title}\nAuthors: {', '.join(abs.authors[:3])}\n"
+            f"Year: {abs.year}\nAbstract: {abs.abstract_content}"
+            for i, abs in enumerate(abstracts)
+        ])
+    
+    @staticmethod
+    def _format_response(question: str, analysis: str, abstracts: List) -> str:
+        """Format simple PubMed response"""
+        response = f"""## 📚 Literature Analysis
 
-        # Step 6: Get BioMistral analysis with RAG context
-        st.info("🧠 Analyzing with BioMistral using RAG-enhanced context...")
-        ai_response = get_BioMistral_response(ai_model, rag_prompt, length_preference)
+**Question:** {question}
 
-        # Step 7: Format final response
-        final_response = f"""## 🔬 RAG-Enhanced Literature Analysis
+### 🔬 BioMistral's Analysis of {len(abstracts)} PubMed Papers:
 
-{ai_response}
+{analysis}
 
 ---
-## 📊 Analysis Methodology
-- **Papers Retrieved:** {len(abstracts)} from PubMed
-- **RAG Processing:** {len(documents)} document chunks created
-- **Semantic Search:** Top {len(relevant_docs)} most relevant sections analyzed
-- **AI Model:** BioMistral-7B with RAG enhancement
 
-## 📚 Key Papers Analyzed:
+### 📖 Key Papers Analyzed:
 """
-
-        # Add paper citations
-        for i, abstract in enumerate(abstracts[:5]):  # Show top 5 papers
-            final_response += f"\n{i+1}. **{abstract.title}** ({abstract.year})\n"
-            final_response += f"   {', '.join(abstract.authors[:2])}{'...' if len(abstract.authors) > 2 else ''}\n"
-            if abstract.pmid:
-                final_response += f"   PMID: {abstract.pmid}\n"
-
-        # Clean up - optionally delete the temporary RAG index
-        # rag_system.delete_vector_index(query_id)  # Uncomment if you want to clean up
-
-        return final_response
-
-    except Exception as e:
-        logger.error(f"Error in RAG-enhanced PubMed query processing: {e}")
-        import traceback
-        traceback.print_exc()
+        for i, abs in enumerate(abstracts[:3]):
+            response += f"\n**{i+1}.** {abs.title} ({abs.year})\n"
         
-        # Fallback to simple BioMistral response
-        fallback_response = get_BioMistral_response(ai_model, question, length_preference)
-        return f"❌ Error in RAG processing: {str(e)}\n\nFalling back to BioMistral knowledge:\n\n{fallback_response}"
-
-
-def test_rag_integration(components):
-    """Test if RAG integration is working properly"""
-    if not all([components['rag_system'], components['storage'], components['ai_model']]):
-        return False, "Missing required components"
+        return response
     
-    try:
-        # Create test documents
-        from langchain.schema import Document
-        test_docs = [
-            Document(
-                page_content="Cancer immunotherapy uses the body's immune system to fight cancer cells. T-cells are engineered to better recognize and attack tumors.",
-                metadata={"title": "Cancer Immunotherapy Review", "year": 2023, "authors": "Smith et al."}
-            ),
-            Document(
-                page_content="CRISPR gene editing allows precise modification of DNA sequences. This technology has applications in treating genetic diseases.",
-                metadata={"title": "CRISPR Technology in Medicine", "year": 2023, "authors": "Johnson et al."}
-            )
-        ]
+    @staticmethod
+    def _format_rag_response_enhanced(pubmed_query: str, general_question: str, analysis: str, abstracts: List, doc_count: int, relevant_sections: int) -> str:
+        """Format RAG-enhanced response with clear separation of queries"""
+        return f"""## 🚀 RAG-Enhanced Literature Analysis
+
+**PubMed Search Query:** "{pubmed_query}"
+**Research Question:** "{general_question}"
+
+### 🔬 Analysis:
+
+{analysis}
+
+---
+
+### 📊 RAG Methodology:
+- **Literature Search:** Used "{pubmed_query}" to retrieve {len(abstracts)} papers from PubMed
+- **Question Analysis:** Used "{general_question}" to query the RAG knowledge base
+- **Document Chunks:** {doc_count} created from retrieved papers
+- **Relevant Sections:** {relevant_sections} most relevant sections identified
+- **Method:** Semantic search + BioMistral analysis
+
+### 📖 Key Papers Retrieved:
+""" + "\n".join([f"**{i+1}.** {abs.title} ({abs.year})" for i, abs in enumerate(abstracts[:5])])
+    
+    @staticmethod
+    def _format_rag_response(question: str, analysis: str, abstracts: List, doc_count: int) -> str:
+        """Format RAG-enhanced response (legacy method for compatibility)"""
+        return f"""## 🚀 RAG-Enhanced Literature Analysis
+
+**Question:** {question}
+
+### 🔬 Analysis:
+
+{analysis}
+
+---
+
+### 📊 Methodology:
+- **Papers Retrieved:** {len(abstracts)} from PubMed
+- **Document Chunks:** {doc_count} created
+- **Method:** RAG + BioMistral analysis
+
+### 📖 Key Papers:
+""" + "\n".join([f"**{i+1}.** {abs.title} ({abs.year})" for i, abs in enumerate(abstracts[:5])])
+
+class UIComponents:
+    """Handle UI component rendering"""
+    
+    @staticmethod
+    def render_header():
+        """Render application header"""
+        st.markdown("""
+        <div style='text-align: center; padding: 20px; background: #ffffff;'>
+            <h1 style='color: #0066cc; font-weight: 700; margin-bottom: 10px;'>
+                🔬 CIM PubMed Research Agent
+            </h1>
+            <h3 style='color: #333333; margin-top: 0px; font-weight: 400;'>
+                AI-Powered Biomedical Research with BioMistral + RAG
+            </h3>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    @staticmethod
+    def render_system_status(components: Dict[str, Any]):
+        """Render system status"""
+        has_errors = any("❌" in status for status in components['status'].values())
         
-        # Test vector store creation
-        test_query_id = "test_rag_integration"
-        vector_store = components['rag_system'].create_vector_index_for_user_query(test_docs, test_query_id)
+        with st.expander("🔍 System Status", expanded=has_errors):
+            for component, status in components['status'].items():
+                if "✅" in status:
+                    st.success(status)
+                elif "⚠️" in status:
+                    st.warning(status)
+                else:
+                    st.error(status)
+    
+    @staticmethod
+    def render_mode_selector(components: Dict[str, Any]):
+        """Render research mode selector with better debugging"""
+        # Show component status for debugging
+        st.markdown("**🔍 Component Status:**")
+        col_debug1, col_debug2, col_debug3 = st.columns(3)
         
-        # Test retrieval
-        retriever = vector_store.as_retriever(search_kwargs={"k": 1})
-        relevant_docs = retriever.get_relevant_documents("What is cancer immunotherapy?")
-        
-        # Cleanup
-        components['rag_system'].delete_vector_index(test_query_id)
-        
-        if relevant_docs and "immunotherapy" in relevant_docs[0].page_content.lower():
-            return True, f"RAG working correctly - retrieved {len(relevant_docs)} relevant documents"
-        else:
-            return False, "RAG retrieval not working as expected"
+        with col_debug1:
+            ai_status = "✅" if components.get('ai_model') else "❌"
+            st.markdown(f"**AI Model:** {ai_status}")
             
-    except Exception as e:
-        return False, f"RAG test failed: {str(e)}"
+        with col_debug2: 
+            retriever_status = "✅" if components.get('retriever') else "❌"
+            st.markdown(f"**PubMed:** {retriever_status}")
+            
+        with col_debug3:
+            rag_status = "✅" if components.get('rag_system') else "❌"
+            st.markdown(f"**RAG System:** {rag_status}")
+        
+        st.markdown("---")
+        
+        # Determine available options based on components
+        if components.get('retriever') and components.get('ai_model') and components.get('rag_system'):
+            options = [
+                "🧠 BioMistral Knowledge Only",
+                "📬 PubMed + BioMistral (Simple)",
+                "🚀 PubMed + RAG + BioMistral (Enhanced)"
+            ]
+            st.success("🚀 **All modes available!** Enhanced RAG mode is ready.")
+        elif components.get('retriever') and components.get('ai_model'):
+            options = [
+                "🧠 BioMistral Knowledge Only", 
+                "📬 PubMed + BioMistral (Simple)"
+            ]
+            st.warning("⚠️ **RAG system not available.** Only simple modes available.")
+        else:
+            options = ["🧠 BioMistral Knowledge Only"]
+            st.info("ℹ️ **Limited mode.** Only AI knowledge available.")
+        
+        mode = st.radio("**Choose research mode:**", options)
+        
+        # Show what each mode does
+        with st.expander("ℹ️ What do these modes do?"):
+            st.markdown("""
+            **🧠 BioMistral Knowledge Only:**
+            - Uses AI's training knowledge
+            - Fast responses
+            - No external data retrieval
+            
+            **📬 PubMed + BioMistral (Simple):**
+            - Searches PubMed for papers
+            - Feeds abstracts directly to AI
+            - Literature-based analysis
+            
+            **🚀 PubMed + RAG + BioMistral (Enhanced):**
+            - Searches PubMed for papers
+            - Creates semantic embeddings
+            - Uses vector search for relevance
+            - Most comprehensive analysis
+            """)
+        
+        return mode, "RAG" in mode, "PubMed" in mode
     
-# STEP 4: Update your main() function in app.py
+    @staticmethod
+    def render_input_fields():
+        """Render input fields"""
+        st.subheader("📝 Input Fields")
+        
+        general_question = st.text_area(
+            "🧠 General Medical/Research Question:",
+            placeholder="e.g., How do cancer cells develop drug resistance?",
+            height=80
+        )
+        
+        pubmed_query = st.text_input(
+            "📚 PubMed Literature Search Query:",
+            placeholder="e.g., cancer immunotherapy, CRISPR Cas9",
+            help="Use specific medical terms for better results"
+        )
+        
+        return general_question, pubmed_query
+    
+    @staticmethod
+    def render_advanced_options(use_pubmed: bool):
+        """Render advanced options"""
+        with st.expander("⚙️ Advanced Options"):
+            options = {}
+            if use_pubmed:
+                options['max_papers'] = st.slider("Max papers:", 5, 50, CONFIG['MAX_PAPERS_DEFAULT'])
+            options['response_length'] = st.select_slider(
+                "Response length:", ["Short", "Medium", "Long"], value=CONFIG['RESPONSE_LENGTH_DEFAULT']
+            )
+            options['max_retries'] = st.slider("Max retries:", 1, 5, CONFIG['MAX_RETRIES_DEFAULT'])
+            return options
+    
+    @staticmethod
+    def render_action_buttons(use_pubmed: bool, use_rag: bool):
+        """Render action buttons with clear RAG indication"""
+        st.markdown("---")
+        st.markdown("**🎯 Available Actions:**")
+        
+        btn_col1, btn_col2 = st.columns(2)
+        
+        with btn_col1:
+            if use_pubmed:
+                button_text = "📚 Search Literature"
+                if use_rag:
+                    button_text += " (RAG Enhanced)"
+                pubmed_button = st.button(button_text, type="primary", use_container_width=True)
+                
+                # Show what this button will do
+                if use_rag:
+                    st.caption("🚀 Will use semantic search + AI analysis")
+                else:
+                    st.caption("📬 Will use simple literature analysis")
+            else:
+                pubmed_button = False
+                st.button("📚 Literature Search", disabled=True, use_container_width=True)
+                st.caption("⚠️ Requires PubMed mode")
+                
+        with btn_col2:
+            general_button = st.button("🧠 Ask BioMistral", type="secondary", use_container_width=True)
+            st.caption("💭 Uses AI knowledge only")
+        
+        # Show instructions for RAG
+        if use_rag:
+            st.success("🚀 **RAG Enhanced Mode Active!**")
+            st.info("📋 **How RAG works:** Enter PubMed terms to retrieve papers, then ask your research question to analyze them.")
+        elif use_pubmed:
+            st.info("📬 **Simple PubMed Mode Active!** Will analyze papers directly.")
+        
+    @staticmethod
+    def render_response(response: str, response_type: str = "general"):
+        """Render AI response with appropriate formatting"""
+        st.markdown("### 📋 Analysis Results:")
+        
+        with st.container():
+            if len(response) > 500:
+                st.text_area(
+                    "Full Response:",
+                    value=response,
+                    height=400 if response_type == "pubmed" else 300,
+                    disabled=True,
+                    key=f"{response_type}_response_display"
+                )
+            else:
+                st.write(response)
+        
+        st.success("✅ Analysis complete!")
+        
+        if len(response) > 100:
+            with st.expander("📋 Copy Response Text"):
+                st.code(response, language="text")
+
+def render_research_interface(components: Dict[str, Any]):
+    """Main research interface"""
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.subheader("🔍 Research Configuration")
+        
+        # Mode selection
+        mode, use_rag, use_pubmed = UIComponents.render_mode_selector(components)
+        
+        # Show mode status
+        if use_rag:
+            st.success("🚀 Enhanced RAG Mode")
+        elif use_pubmed:
+            st.info("📬 Simple PubMed Mode")
+        else:
+            st.info("🧠 Knowledge Mode")
+        
+        st.markdown("---")
+        
+        # Input fields
+        general_question, pubmed_query = UIComponents.render_input_fields()
+        
+        # Advanced options
+        options = UIComponents.render_advanced_options(use_pubmed)
+        
+        # Action buttons
+        st.markdown("---")
+        st.markdown("**🎯 Available Actions:**")
+        
+        btn_col1, btn_col2 = st.columns(2)
+        
+        with btn_col1:
+            if use_pubmed:
+                button_text = "📚 Search Literature"
+                if use_rag:
+                    button_text += " (RAG Enhanced)"
+                pubmed_button = st.button(button_text, type="primary", use_container_width=True)
+                
+                # Show what this button will do
+                if use_rag:
+                    st.caption(" Will use semantic search + AI analysis")
+                else:
+                    st.caption(" Will use simple literature analysis")
+            else:
+                pubmed_button = False
+                st.button("📚 Literature Search", disabled=True, use_container_width=True)
+                st.caption("⚠️ Requires PubMed mode")
+                
+        with btn_col2:
+            general_button = st.button("🧠 Ask BioMistral", type="secondary", use_container_width=True)
+            st.caption("💭 Uses AI knowledge only")
+        
+        # Show instructions for RAG
+        if use_rag:
+            st.success("🚀 **RAG Enhanced Mode Active!**")
+            st.info("📋 **How RAG works:** Enter PubMed terms to retrieve papers, then ask your research question to analyze them.")
+        elif use_pubmed:
+            st.info("📬 **Simple PubMed Mode Active!** Will analyze papers directly.")
+    
+    with col2:
+        st.subheader("🤖 Analysis Results")
+        
+        # Handle PubMed search
+        if pubmed_button and pubmed_query.strip() and use_pubmed:
+            with st.spinner("🔍 Processing literature..."):
+                if use_rag and general_question.strip():
+                    # RAG mode: Use PubMed query for retrieval, general question for analysis
+                    st.info("🚀 RAG Mode: Using PubMed query for literature retrieval and general question for analysis")
+                    response = PubMedProcessor.process_rag_query(
+                        pubmed_query, general_question,  # Separate queries
+                        components['retriever'], components['ai_model'],
+                        components['rag_system'], components['storage'],
+                        options.get('max_papers', CONFIG['MAX_PAPERS_DEFAULT']),
+                        options.get('response_length', CONFIG['RESPONSE_LENGTH_DEFAULT'])
+                    )
+                elif use_rag and not general_question.strip():
+                    # RAG mode but no general question - use PubMed query for both
+                    st.warning("⚠️ RAG mode selected but no general question provided. Using PubMed query for analysis.")
+                    response = PubMedProcessor.process_rag_query(
+                        pubmed_query, pubmed_query,  # Use same query for both
+                        components['retriever'], components['ai_model'],
+                        components['rag_system'], components['storage'],
+                        options.get('max_papers', CONFIG['MAX_PAPERS_DEFAULT']),
+                        options.get('response_length', CONFIG['RESPONSE_LENGTH_DEFAULT'])
+                    )
+                else:
+                    # Simple PubMed mode
+                    response = PubMedProcessor.process_simple_query(
+                        pubmed_query, components['retriever'], components['ai_model'],
+                        options.get('max_papers', CONFIG['MAX_PAPERS_DEFAULT']),
+                        options.get('response_length', CONFIG['RESPONSE_LENGTH_DEFAULT'])
+                    )
+                
+                UIComponents.render_response(response, "pubmed")
+        
+        # Handle general question
+        elif general_button and general_question.strip():
+            with st.spinner("🤔 Processing question..."):
+                if use_pubmed and not pubmed_query.strip():
+                    st.warning("⚠️ PubMed mode selected but no query provided! Using knowledge mode.")
+                
+                response = PromptEngine.get_biomistral_response(
+                    components['ai_model'], general_question,
+                    options.get('response_length', CONFIG['RESPONSE_LENGTH_DEFAULT']),
+                    max_retries=options.get('max_retries', CONFIG['MAX_RETRIES_DEFAULT'])
+                )
+                
+                UIComponents.render_response(response, "general")
+        
+        # Show instructions
+        else:
+            if not (pubmed_button or general_button):
+                st.info("👈 Choose your research approach")
+                st.markdown("""
+                **🧠 General Questions:** Knowledge-based answers from BioMistral
+                **📚 Literature Research:** Evidence-based analysis from PubMed papers
+                """)
 
 def main():
-    """Enhanced main application function with RAG support"""
+    """Main application"""
     st.set_page_config(
-        page_title="PubMed Abstract Screener with BioMistral + RAG",
+        page_title="CIM PubMed Research Agent",
         page_icon='🔬',
         layout='wide',
         initial_sidebar_state='expanded'
     )
-
-    # Header
-    st.title("🔬 PubMed Abstract Screener")
-    st.markdown("**AI-Powered Biomedical Research Assistant with BioMistral + RAG**")
-
-    # Initialize system components with enhanced initialization
-    with st.spinner("🚀 Initializing BioMistral, RAG system, and components..."):
-        # Use enhanced initialization if you implemented Step 3B, otherwise use your existing one
-        try:
-            components = initialize_system_components_enhanced()
-        except:
-            # Fallback to your existing initialization
-            components = initialize_system_components()
-
-    # Render system status
-    render_system_status(components)
-
-    # Check if core AI is available
+    
+    # Load theme
+    load_custom_css()
+    
+    # Render header
+    UIComponents.render_header()
+    
+    # Initialize components
+    with st.spinner("🚀 Initializing system..."):
+        components = initialize_system_components()
+    
+    # Show system status
+    UIComponents.render_system_status(components)
+    
+    # Check if AI model is available
     if not components['ai_model']:
-        st.error("❌ BioMistral AI assistant not available. Please check the system status above.")
-        st.info("💡 Make sure your BioMistral model is properly installed and configured.")
+        st.error("❌ BioMistral not available. Please check system status.")
+        with st.expander("🔧 Troubleshooting", expanded=True):
+            st.markdown("""
+            **Try these fixes:**
+            1. Update PyTorch: `pip install torch --upgrade`
+            2. Check model files
+            3. Use CPU mode: `export CUDA_VISIBLE_DEVICES=""`
+            """)
         st.stop()
-
-    # Show RAG availability status
+    
+    # Show capabilities
     if components['rag_system']:
-        st.success("🚀 RAG-enhanced analysis available! Try the 'RAG + BioMistral' mode for best results.")
+        st.success("🚀 Full capabilities available!")
     elif components['retriever']:
-        st.info("📬 PubMed analysis available. RAG system not fully ready - using simple mode.")
+        st.info("📬 PubMed + AI available")
     else:
-        st.warning("🧠 Only BioMistral knowledge mode available. PubMed and RAG systems not ready.")
-
-    # Main interface (updated)
+        st.warning("🧠 AI-only mode")
+    
+    # Main interface
     render_research_interface(components)
-
-    # Chat interface
-    render_chat_interface(components['ai_model'])
-
-    # Enhanced sidebar with RAG test
-    render_sidebar_with_rag_test(components)
-
+    
     # Footer
     st.markdown("---")
     st.markdown("""
-    <div style='text-align: center; color: #666; font-size: 0.8em;'>
-        🔬 PubMed Abstract Screener | Powered by BioMistral + RAG | Built with Streamlit |
-        <a href='https://www.ncbi.nlm.nih.gov/pubmed/' target='_blank'>PubMed</a> Integration
+    <div style='text-align: center; color: #666666; font-size: 0.9em; padding: 20px;'>
+        🔬 <strong>CIM PubMed Research Agent</strong> | 
+        Powered by BioMistral + RAG | Built with Streamlit
     </div>
     """, unsafe_allow_html=True)
-
-
-
-
 
 if __name__ == "__main__":
     main()
