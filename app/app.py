@@ -4,26 +4,33 @@ import sys
 from typing import Optional, Dict, Any, List
 import logging
 from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv()  # This loads the .env file
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Configuration
+# Then your CONFIG can read from environment
 CONFIG = {
-    'PUBMED_EMAIL': "gnanaolivu.rohandavid@mayo.com",
-    'PUBMED_API_KEY': "f9ecce69a73048b82ca4747f51d6dec61408",
+    'PUBMED_EMAIL': os.getenv('PUBMED_EMAIL', "gnanaolivu.rohandavid@mayo.com"),
+    'PUBMED_API_KEY': os.getenv('PUBMED_API_KEY', "f9ecce69a73048b82ca4747f51d6dec61408"),
     'MAX_PAPERS_DEFAULT': 20,
     'RESPONSE_LENGTH_DEFAULT': "Medium",
     'MAX_RETRIES_DEFAULT': 3
 }
 
-# Set environment variables
+# Set environment variables (this will now use loaded values)
 os.environ.update({
+    'PUBMED_EMAIL': CONFIG['PUBMED_EMAIL'],
+    'PUBMED_API_KEY': CONFIG['PUBMED_API_KEY'],
+    'NCBI_API_KEY': os.getenv('NCBI_API_KEY', CONFIG['PUBMED_API_KEY']),
+    'HUGGINGFACE_KEY': os.getenv('HUGGINGFACE_KEY', ''),
     'ANONYMIZED_TELEMETRY': 'False',
     'CHROMA_TELEMETRY': 'False',
     'POSTHOG_HOST': ''
 })
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
 
 def load_custom_css():
     """Load clean white theme CSS"""
